@@ -1,0 +1,13 @@
+/* Fitness AI Coach - custom styles */
+.stApp {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+h1,
+h2,
+h3 {
+  color: #1a1a2e;
+}
+.sidebar .sidebar-content {
+  background-color: #f8f9fa;
+}

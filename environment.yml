@@ -1,0 +1,11 @@
+# Conda environment for Fitness AI Trainer
+# Create: conda env create -f environment.yml
+# Then: conda activate fitness-ai-trainer && pip install -r requirements.txt
+# Run app: streamlit run main.py
+name: fitness-ai-trainer
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pip

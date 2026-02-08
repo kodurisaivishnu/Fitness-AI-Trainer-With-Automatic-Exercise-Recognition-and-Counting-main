@@ -1,0 +1,13 @@
+Test accuracy: 0.9833
+
+Classification report:
+                                    precision    recall  f1-score   support
+
+final_kaggle_with_additional_video     0.9597    0.9807    0.9701      2743
+                   my_test_video_1     0.9946    0.9973    0.9959       737
+                   similar_dataset     0.9764    0.9520    0.9641      2437
+                 synthetic_dataset     1.0000    0.9998    0.9999      4427
+
+                          accuracy                         0.9833     10344
+                         macro avg     0.9827    0.9824    0.9825     10344
+                      weighted avg     0.9834    0.9833    0.9833     10344

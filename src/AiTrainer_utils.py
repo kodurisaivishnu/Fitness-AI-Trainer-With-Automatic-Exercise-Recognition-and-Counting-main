@@ -35,10 +35,12 @@ def image_resize(image, width=None, height=None, inter=cv2.INTER_AREA):
 
 def visualize_fps(img, pTime = 0):
     cTime = time.time()
-    fps = 1 / (cTime - pTime)
+    elapsed = cTime - pTime
+    fps = 1 / elapsed if elapsed > 0 else 0
     pTime = cTime
     cv2.putText(img, str(int(fps)), (50, 100), cv2.FONT_HERSHEY_PLAIN, 5,
                 (255, 0, 0), 5)
+    return pTime
 
 # function that find distance between two point
 def distanceCalculate(p1, p2):

@@ -3,22 +3,29 @@ import math
 import cv2
 import time
 
-# ADD THE MACHINE LEARNING MECHANIOSM TO MAKE THE CALCULATION OF THE EXERCISE EIN AN AUTOMATIC WAY
+
 class posture_detector():
-    def __init__(self, mode=False, up_body=1, smooth=True,
+    def __init__(self, mode=False, model_complexity=1, smooth=True,
                  detection_con=0.5, track_con=0.5):
         self.mode = mode
-        self.up_body = up_body
+        self.model_complexity = model_complexity
         self.smooth = smooth
         self.detection_con = detection_con
         self.track_con = track_con
 
         self.mp_draw = mp.solutions.drawing_utils
         self.mp_pose = mp.solutions.pose
-        self.pose = self.mp_pose.Pose(self.mode, self.up_body, self.smooth,
-                                     min_detection_confidence=self.detection_con, min_tracking_confidence= self.track_con)
+        self.pose = self.mp_pose.Pose(
+            static_image_mode=self.mode,
+            model_complexity=self.model_complexity,
+            smooth_landmarks=self.smooth,
+            min_detection_confidence=self.detection_con,
+            min_tracking_confidence=self.track_con
+        )
+        self.results = None
+        self.landmark_list = []
+
     def find_person(self, img, draw=True):
-        # Recolor image to RGB
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         self.results = self.pose.process(img_rgb)
 
@@ -29,30 +36,26 @@ class posture_detector():
 
     def find_landmarks(self, img, draw=True):
         self.landmark_list = []
-        if self.results.pose_landmarks:
+        if self.results and self.results.pose_landmarks:
             for id, lm in enumerate(self.results.pose_landmarks.landmark):
                 h, w, c = img.shape
-                # print(id, lm)
                 cx, cy = int(lm.x * w), int(lm.y * h)
                 self.landmark_list.append([id, cx, cy])
                 if draw:
                     cv2.circle(img, (cx, cy), 5, (255, 0, 0), cv2.FILLED)
         return self.landmark_list
 
-    # Given any three points/co-ordinates, it gives us an angle(joint)
     def find_angle(self, img, p1, p2, p3, draw=True):
-        # Get the landmarks
+        if not self.landmark_list or max(p1, p2, p3) >= len(self.landmark_list):
+            return 0.0
         x1, y1 = self.landmark_list[p1][1:]
         x2, y2 = self.landmark_list[p2][1:]
         x3, y3 = self.landmark_list[p3][1:]
-        # Calculate the Angle
         angle = math.degrees(math.atan2(y3 - y2, x3 - x2) -
                              math.atan2(y1 - y2, x1 - x2))
         if angle < 0:
             angle += 360
 
-
-        # Draw
         if draw:
             cv2.line(img, (x1, y1), (x2, y2), (255, 255, 255), 5)
             cv2.line(img, (x3, y3), (x2, y2), (255, 255, 255), 5)
@@ -69,25 +72,26 @@ class posture_detector():
 
     def find_coordinate(self):
         pass
+
+
 def main():
     cap = cv2.VideoCapture(0)
     detector = posture_detector()
+    pTime = time.time()
     while True:
         ret, frame = cap.read()
-
-        pTime = 0
+        if not ret:
+            break
 
         img = detector.find_person(frame)
         landmark_list = detector.find_landmarks(img, draw=True)
-        # angle = detector.find_angle(img, 16, 14, 12)
-       # print(landmark_list)
-        if len(landmark_list) != 0:
 
+        if len(landmark_list) != 0:
             cv2.circle(
                 img, (landmark_list[14][1], landmark_list[14][2]), 15, (0, 0, 255), cv2.FILLED)
 
         cTime = time.time()
-        fps = 1 / (cTime - pTime)
+        fps = 1 / (cTime - pTime) if (cTime - pTime) > 0 else 0
         pTime = cTime
 
         cv2.putText(img, str(int(fps)), (70, 50), cv2.FONT_HERSHEY_PLAIN, 3,
@@ -97,10 +101,8 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-
     cap.release()
     cv2.destroyAllWindows()
-
 
 
 if __name__ == "__main__":

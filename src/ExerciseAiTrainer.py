@@ -10,7 +10,15 @@ from tensorflow import keras
 import mediapipe as mp
 import time
 import json
+import threading
 from pathlib import Path
+
+# Optional voice feedback
+try:
+    import pyttsx3
+    _TTS_AVAILABLE = True
+except ImportError:
+    _TTS_AVAILABLE = False
 
 # Project root (parent of src/)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -21,6 +29,7 @@ class LabelEncoderCompat:
     """Compatible with pickles saved by train script (expects .classes_)."""
     def __init__(self, classes):
         self.classes_ = np.array(classes)
+
 _MODEL_H5 = _MODELS_DIR / "final_forthesis_bidirectionallstm_and_encoders_exercise_classifier_model.h5"
 _MODEL_KERAS = _MODELS_DIR / "final_forthesis_bidirectionallstm_and_encoders_exercise_classifier_model.keras"
 _SCALER_PKL = _MODELS_DIR / "thesis_bidirectionallstm_scaler.pkl"
@@ -46,10 +55,76 @@ relevant_landmarks_indices = [
     mp_pose.PoseLandmark.RIGHT_ANKLE.value
 ]
 
+# --- Calorie estimation (MET values per exercise) ---
+# MET = Metabolic Equivalent of Task
+EXERCISE_MET = {
+    'push-up': 8.0,
+    'squat': 5.5,
+    'barbell biceps curl': 3.5,
+    'shoulder press': 4.0,
+}
+# Average seconds per rep (approximate)
+EXERCISE_SEC_PER_REP = {
+    'push-up': 3.0,
+    'squat': 4.0,
+    'barbell biceps curl': 3.5,
+    'shoulder press': 3.0,
+}
+
+def estimate_calories(exercise_name, rep_count, user_weight_kg=70):
+    """Estimate calories burned: MET * weight_kg * time_hours * 1.05"""
+    met = EXERCISE_MET.get(exercise_name, 4.0)
+    sec_per_rep = EXERCISE_SEC_PER_REP.get(exercise_name, 3.5)
+    time_hours = (rep_count * sec_per_rep) / 3600.0
+    return met * user_weight_kg * time_hours * 1.05
+
+
+# --- Voice Feedback Engine ---
+class VoiceFeedback:
+    """Non-blocking voice feedback using pyttsx3 in a background thread."""
+    def __init__(self, enabled=True):
+        self.enabled = enabled and _TTS_AVAILABLE
+        self._lock = threading.Lock()
+        self._speaking = False
+        self._last_spoken = ""
+        self._last_spoken_time = 0
+        self._cooldown = 4.0  # seconds between voice tips
+
+    def speak(self, text):
+        if not self.enabled or not text:
+            return
+        now = time.time()
+        with self._lock:
+            if self._speaking:
+                return
+            if text == self._last_spoken and (now - self._last_spoken_time) < self._cooldown:
+                return
+            self._speaking = True
+            self._last_spoken = text
+            self._last_spoken_time = now
+
+        def _do_speak():
+            try:
+                engine = pyttsx3.init()
+                engine.setProperty('rate', 160)
+                engine.setProperty('volume', 0.9)
+                engine.say(text)
+                engine.runAndWait()
+                engine.stop()
+            except Exception:
+                pass
+            finally:
+                with self._lock:
+                    self._speaking = False
+
+        t = threading.Thread(target=_do_speak, daemon=True)
+        t.start()
+
+
 # Function to calculate angle between three points
 def calculate_angle(a, b, c):
     if np.any(np.array([a, b, c]) == 0):
-        return -1.0  # Placeholder for missing landmarks
+        return -1.0
     a = np.array(a)
     b = np.array(b)
     c = np.array(c)
@@ -59,18 +134,16 @@ def calculate_angle(a, b, c):
         angle = 360 - angle
     return angle
 
-# Function to calculate Euclidean distance between two points
 def calculate_distance(a, b):
     if np.any(np.array([a, b]) == 0):
-        return -1.0  # Placeholder for missing landmarks
+        return -1.0
     a = np.array(a)
     b = np.array(b)
     return np.linalg.norm(a - b)
 
-# Function to calculate Y-coordinate distance between two points
 def calculate_y_distance(a, b):
     if np.any(np.array([a, b]) == 0):
-        return -1.0  # Placeholder for missing landmarks
+        return -1.0
     return np.abs(a[1] - b[1])
 
 def draw_styled_text(frame, text, position, font=cv2.FONT_HERSHEY_SIMPLEX, font_scale=0.55, font_color=(255, 255, 255), font_thickness=2, bg_color=(0, 0, 0), padding=5):
@@ -82,7 +155,7 @@ def draw_styled_text(frame, text, position, font=cv2.FONT_HERSHEY_SIMPLEX, font_
 
 
 def _angle_from_landmarks(landmark_list, p1, p2, p3):
-    """Angle at p2 (landmark index) between p1-p2-p3, in degrees [0, 360). Returns -1 if missing."""
+    """Angle at p2 (landmark index) between p1-p2-p3, in degrees [0, 360)."""
     if not landmark_list or max(p1, p2, p3) >= len(landmark_list):
         return -1.0
     x1, y1 = landmark_list[p1][1], landmark_list[p1][2]
@@ -94,11 +167,50 @@ def _angle_from_landmarks(landmark_list, p1, p2, p3):
     return angle
 
 
+# --- Injury Prevention Alerts ---
+def get_injury_alerts(landmark_list, exercise_name):
+    """Return a critical injury prevention warning if dangerous form is detected."""
+    if not landmark_list or len(landmark_list) < 29:
+        return None
+
+    if exercise_name == "squat":
+        # Check if knees go too far past toes (knee x vs ankle x from front view)
+        left_knee = landmark_list[25][1:]  # x, y
+        left_ankle = landmark_list[27][1:]
+        right_knee = landmark_list[26][1:]
+        right_ankle = landmark_list[28][1:]
+        # Check knee angle - too deep squat is dangerous
+        left_knee_angle = _angle_from_landmarks(landmark_list, 23, 25, 27)
+        right_knee_angle = _angle_from_landmarks(landmark_list, 24, 26, 28)
+        if left_knee_angle >= 0 and right_knee_angle >= 0:
+            if left_knee_angle < 50 or right_knee_angle < 50:
+                return "DANGER: Squat too deep! Risk of knee injury"
+        # Check if back is rounding (shoulder-hip-knee alignment)
+        left_back_angle = _angle_from_landmarks(landmark_list, 11, 23, 25)
+        if left_back_angle >= 0 and (left_back_angle < 60 or left_back_angle > 300):
+            return "WARNING: Keep your back straight!"
+
+    elif exercise_name == "push-up":
+        # Check hip sag (shoulder-hip-ankle should be roughly straight)
+        left_body = _angle_from_landmarks(landmark_list, 11, 23, 27)
+        right_body = _angle_from_landmarks(landmark_list, 12, 24, 28)
+        if left_body >= 0 and right_body >= 0:
+            # Very bent body = hip sag
+            avg_body = (left_body + right_body) / 2
+            if 120 < avg_body < 150:
+                return "WARNING: Hips sagging! Engage your core"
+
+    elif exercise_name == "shoulder press":
+        # Check for excessive back arch
+        left_align = _angle_from_landmarks(landmark_list, 11, 23, 25)
+        if left_align >= 0 and left_align < 150 and left_align > 0:
+            return "WARNING: Don't arch your back too much"
+
+    return None
+
+
 def get_form_suggestions(landmark_list, exercise_name):
-    """
-    Return a short live form suggestion only when form is clearly wrong.
-    Conservative thresholds to avoid wrong tips; only one suggestion at a time.
-    """
+    """Return a short live form suggestion only when form is clearly wrong."""
     if not landmark_list or len(landmark_list) < 29:
         return None
     suggestion = None
@@ -150,7 +262,6 @@ def get_form_suggestions(landmark_list, exercise_name):
 def count_repetition_push_up(detector, img, landmark_list, stage, counter, exercise_instance):
     right_arm_angle = detector.find_angle(img, 12, 14, 16)
     right_shoulder = landmark_list[12][1:]
-    right_wrist = landmark_list[16][1:]
     left_arm_angle = detector.find_angle(img, 11, 13, 15)
     left_shoulder = landmark_list[11][1:]
     exercise_instance.visualize_angle(img, right_arm_angle, right_shoulder)
@@ -161,9 +272,8 @@ def count_repetition_push_up(detector, img, landmark_list, stage, counter, exerc
     if left_arm_angle > 240 and stage == "down":
         stage = "up"
         counter += 1
-    
-    return stage, counter
 
+    return stage, counter
 
 
 def count_repetition_squat(detector, img, landmark_list, stage, counter, exercise_instance):
@@ -177,7 +287,7 @@ def count_repetition_squat(detector, img, landmark_list, stage, counter, exercis
     if right_leg_angle < 140 and left_leg_angle > 210 and stage == "down":
         stage = "up"
         counter += 1
-    
+
     return stage, counter
 
 def count_repetition_bicep_curl(detector, img, landmark_list, stage_right, stage_left, counter, exercise_instance):
@@ -190,12 +300,12 @@ def count_repetition_bicep_curl(detector, img, landmark_list, stage_right, stage
         stage_right = "down"
     if left_arm_angle < 200 and left_arm_angle > 140:
         stage_left = "down"
-    
+
     if stage_right == "down" and (right_arm_angle > 310 or right_arm_angle < 60) and (left_arm_angle > 310 or left_arm_angle < 60) and stage_left == "down":
         stage_right = "up"
         stage_left = "up"
         counter += 1
-    
+
     return stage_right, stage_left, counter
 
 def count_repetition_shoulder_press(detector, img, landmark_list, stage, counter, exercise_instance):
@@ -209,18 +319,19 @@ def count_repetition_shoulder_press(detector, img, landmark_list, stage, counter
     if right_arm_angle < 240 and left_arm_angle > 120 and stage == "down":
         stage = "up"
         counter += 1
-    
+
     return stage, counter
 
 
-
-# Define the class that handles the analysis of the exercises
 class Exercise:
     def __init__(self):
         self.lstm_model = None
-        self._load_error = []  # list of (component, error_message) for debugging
+        self._load_error = []
+        self.voice = VoiceFeedback(enabled=True)
+        self.session_start = None
+        self.session_data = {}  # exercise_name -> {'reps': N, 'calories': float}
 
-        # Try .keras first (Keras 3 loads it reliably); then .h5
+        # Try .keras first; then .h5
         for path in (_MODEL_KERAS, _MODEL_H5):
             if not path.exists():
                 continue
@@ -253,14 +364,11 @@ class Exercise:
             self._load_error.append(("scaler", str(e)))
 
         try:
-            # Pickle was saved from train script run as __main__, so it looks for __main__.LabelEncoderCompat.
-            # Patch __main__ so joblib can resolve the class when loading.
             import sys
             main_mod = sys.modules.get("__main__")
             if main_mod is not None:
                 setattr(main_mod, "LabelEncoderCompat", LabelEncoderCompat)
             self.label_encoder = joblib.load(str(_LABEL_ENCODER_PKL))
-            # Ensure list of Python strings for comparison with 'push-up', etc.
             raw = self.label_encoder.classes_
             self.exercise_classes = [str(x) for x in (raw.tolist() if hasattr(raw, "tolist") else raw)]
         except Exception as e:
@@ -271,69 +379,60 @@ class Exercise:
     def extract_features(self, landmarks):
         features = []
         if len(landmarks) == len(relevant_landmarks_indices) * 3:
-            # Angles
-            features.append(calculate_angle(landmarks[0:3], landmarks[6:9], landmarks[12:15]))  # LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST
-            features.append(calculate_angle(landmarks[3:6], landmarks[9:12], landmarks[15:18]))  # RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST
-            features.append(calculate_angle(landmarks[18:21], landmarks[24:27], landmarks[30:33]))  # LEFT_HIP, LEFT_KNEE, LEFT_ANKLE
-            features.append(calculate_angle(landmarks[21:24], landmarks[27:30], landmarks[33:36]))  # RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE
-            features.append(calculate_angle(landmarks[0:3], landmarks[18:21], landmarks[24:27]))  # LEFT_SHOULDER, LEFT_HIP, LEFT_KNEE
-            features.append(calculate_angle(landmarks[3:6], landmarks[21:24], landmarks[27:30]))  # RIGHT_SHOULDER, RIGHT_HIP, RIGHT_KNEE
+            features.append(calculate_angle(landmarks[0:3], landmarks[6:9], landmarks[12:15]))
+            features.append(calculate_angle(landmarks[3:6], landmarks[9:12], landmarks[15:18]))
+            features.append(calculate_angle(landmarks[18:21], landmarks[24:27], landmarks[30:33]))
+            features.append(calculate_angle(landmarks[21:24], landmarks[27:30], landmarks[33:36]))
+            features.append(calculate_angle(landmarks[0:3], landmarks[18:21], landmarks[24:27]))
+            features.append(calculate_angle(landmarks[3:6], landmarks[21:24], landmarks[27:30]))
+            features.append(calculate_angle(landmarks[18:21], landmarks[0:3], landmarks[6:9]))
+            features.append(calculate_angle(landmarks[21:24], landmarks[3:6], landmarks[9:12]))
 
-            # New angles
-            features.append(calculate_angle(landmarks[18:21], landmarks[0:3], landmarks[6:9]))  # LEFT_HIP, LEFT_SHOULDER, LEFT_ELBOW
-            features.append(calculate_angle(landmarks[21:24], landmarks[3:6], landmarks[9:12]))  # RIGHT_HIP, RIGHT_SHOULDER, RIGHT_ELBOW
-
-            # Distances
             distances = [
-                calculate_distance(landmarks[0:3], landmarks[3:6]),  # LEFT_SHOULDER, RIGHT_SHOULDER
-                calculate_distance(landmarks[18:21], landmarks[21:24]),  # LEFT_HIP, RIGHT_HIP
-                calculate_distance(landmarks[18:21], landmarks[24:27]),  # LEFT_HIP, LEFT_KNEE
-                calculate_distance(landmarks[21:24], landmarks[27:30]),  # RIGHT_HIP, RIGHT_KNEE
-                calculate_distance(landmarks[0:3], landmarks[18:21]),  # LEFT_SHOULDER, LEFT_HIP
-                calculate_distance(landmarks[3:6], landmarks[21:24]),  # RIGHT_SHOULDER, RIGHT_HIP
-                calculate_distance(landmarks[6:9], landmarks[24:27]),  # LEFT_ELBOW, LEFT_KNEE
-                calculate_distance(landmarks[9:12], landmarks[27:30]),  # RIGHT_ELBOW, RIGHT_KNEE
-                calculate_distance(landmarks[12:15], landmarks[0:3]),  # LEFT_WRIST, LEFT_SHOULDER
-                calculate_distance(landmarks[15:18], landmarks[3:6]),  # RIGHT_WRIST, RIGHT_SHOULDER
-                calculate_distance(landmarks[12:15], landmarks[18:21]),  # LEFT_WRIST, LEFT_HIP
-                calculate_distance(landmarks[15:18], landmarks[21:24])   # RIGHT_WRIST, RIGHT_HIP
+                calculate_distance(landmarks[0:3], landmarks[3:6]),
+                calculate_distance(landmarks[18:21], landmarks[21:24]),
+                calculate_distance(landmarks[18:21], landmarks[24:27]),
+                calculate_distance(landmarks[21:24], landmarks[27:30]),
+                calculate_distance(landmarks[0:3], landmarks[18:21]),
+                calculate_distance(landmarks[3:6], landmarks[21:24]),
+                calculate_distance(landmarks[6:9], landmarks[24:27]),
+                calculate_distance(landmarks[9:12], landmarks[27:30]),
+                calculate_distance(landmarks[12:15], landmarks[0:3]),
+                calculate_distance(landmarks[15:18], landmarks[3:6]),
+                calculate_distance(landmarks[12:15], landmarks[18:21]),
+                calculate_distance(landmarks[15:18], landmarks[21:24])
             ]
 
-            # Y-coordinate distances
             y_distances = [
-                calculate_y_distance(landmarks[6:9], landmarks[0:3]),  # LEFT_ELBOW, LEFT_SHOULDER
-                calculate_y_distance(landmarks[9:12], landmarks[3:6])   # RIGHT_ELBOW, RIGHT_SHOULDER
+                calculate_y_distance(landmarks[6:9], landmarks[0:3]),
+                calculate_y_distance(landmarks[9:12], landmarks[3:6])
             ]
 
-            # Normalization factor based on shoulder-hip or hip-knee distance
             normalization_factor = -1
             distances_to_check = [
-                calculate_distance(landmarks[0:3], landmarks[18:21]),  # LEFT_SHOULDER, LEFT_HIP
-                calculate_distance(landmarks[3:6], landmarks[21:24]),  # RIGHT_SHOULDER, RIGHT_HIP
-                calculate_distance(landmarks[18:21], landmarks[24:27]),  # LEFT_HIP, LEFT_KNEE
-                calculate_distance(landmarks[21:24], landmarks[27:30])   # RIGHT_HIP, RIGHT_KNEE
+                calculate_distance(landmarks[0:3], landmarks[18:21]),
+                calculate_distance(landmarks[3:6], landmarks[21:24]),
+                calculate_distance(landmarks[18:21], landmarks[24:27]),
+                calculate_distance(landmarks[21:24], landmarks[27:30])
             ]
 
             for distance in distances_to_check:
                 if distance > 0:
                     normalization_factor = distance
                     break
-            
+
             if normalization_factor == -1:
-                normalization_factor = 0.5  # Fallback normalization factor
-            
-            # Normalize distances
+                normalization_factor = 0.5
+
             normalized_distances = [d / normalization_factor if d != -1.0 else d for d in distances]
             normalized_y_distances = [d / normalization_factor if d != -1.0 else d for d in y_distances]
 
-            # Combine features
             features.extend(normalized_distances)
             features.extend(normalized_y_distances)
-
         else:
-            features = [-1.0] * 22  # Placeholder for missing landmarks
+            features = [-1.0] * 22
         return features
-    
+
     def preprocess_frame(self, frame, pose):
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = pose.process(frame_rgb)
@@ -343,7 +442,7 @@ class Exercise:
                 landmark = results.pose_landmarks.landmark[idx]
                 landmarks.extend([landmark.x, landmark.y, landmark.z])
         return landmarks
-    
+
     def visualize_angle(self, img, angle, landmark):
         h, w = img.shape[:2]
         if len(landmark) >= 2:
@@ -357,19 +456,40 @@ class Exercise:
             pt = (0, 0)
         cv2.putText(img, str(int(angle)), pt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
 
-    # Auto classify and count method with repetition counting logic
+    def _update_session(self, exercise_name, counter):
+        """Track session data for summary."""
+        if exercise_name not in self.session_data:
+            self.session_data[exercise_name] = {'reps': 0, 'calories': 0.0}
+        self.session_data[exercise_name]['reps'] = counter
+        self.session_data[exercise_name]['calories'] = estimate_calories(exercise_name, counter)
+
+    def get_session_summary(self):
+        """Return session summary dict."""
+        total_reps = sum(d['reps'] for d in self.session_data.values())
+        total_cal = sum(d['calories'] for d in self.session_data.values())
+        duration = time.time() - self.session_start if self.session_start else 0
+        return {
+            'exercises': dict(self.session_data),
+            'total_reps': total_reps,
+            'total_calories': round(total_cal, 1),
+            'duration_sec': round(duration, 1),
+        }
+
     def auto_classify_and_count(self):
         if self.lstm_model is None or self.scaler is None or self.label_encoder is None:
             msg = "Model not loaded. Ensure files in **models/** are present (model .h5 or .keras, scaler .pkl, label_encoder .pkl)."
             if self._load_error:
                 details = "; ".join(f"{c}: {e}" for c, e in self._load_error)
                 msg += f" Load error(s): {details}"
-            msg += " If the model file fails to load, re-run training once to create a .keras copy: `python scripts/run_demo_training.py`"
             st.error(msg)
             return
+
+        self.session_start = time.time()
         stframe = st.empty()
+        status_placeholder = st.empty()
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
+            st.error("Could not open camera.")
             return
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -384,19 +504,21 @@ class Exercise:
         landmarks_window = []
         frame_count = 0
         current_prediction = "No prediction yet"
-        canonical_prediction = None  # exercise name used for counting/display (maps model output to push-up/squat/etc.)
+        canonical_prediction = None
         last_predicted_class = -1
-        prediction_history = []  # last N predictions for stability
-        stable_exercise = None  # only show tips when same exercise predicted 2+ times
+        prediction_history = []
+        stable_exercise = None
         tip_cooldown_sec = 2.0
         last_tip_text = None
         last_tip_time = 0.0
+        last_injury_text = None
+        last_injury_time = 0.0
         counters = {'push_up': 0, 'squat': 0, 'bicep_curl': 0, 'shoulder_press': 0}
         stages = {'push_up': None, 'squat': None, 'left_bicep_curl': None, 'right_bicep_curl': None, 'shoulder_press': None}
         known_exercises = {'push-up', 'squat', 'shoulder press', 'barbell biceps curl'}
-        # When model was trained with dataset/source names, map class index or class name to exercise (see train_info.json)
         canonical_by_index = ['push-up', 'squat', 'barbell biceps curl', 'shoulder press']
-        class_name_to_exercise = {}  # model class name -> exercise name (from train_info "class_to_exercise")
+        class_name_to_exercise = {}
+
         try:
             info_path = _MODELS_DIR / "train_info.json"
             if info_path.exists():
@@ -408,9 +530,10 @@ class Exercise:
         except Exception:
             pass
         canonical_to_display = {'push-up': 'Push-up', 'squat': 'Squat', 'barbell biceps curl': 'Curl', 'shoulder press': 'Press'}
+        counter_key_map = {'push-up': 'push_up', 'squat': 'squat', 'barbell biceps curl': 'bicep_curl', 'shoulder press': 'shoulder_press'}
 
         detector = pm.posture_detector()
-        pose = mp.solutions.pose.Pose()
+        pose_local = mp.solutions.pose.Pose()
 
         try:
             while True:
@@ -418,10 +541,10 @@ class Exercise:
                     ret, frame = cap.read()
                 except Exception:
                     break
-                if not ret:
+                if not ret or frame is None:
                     break
 
-                landmarks = self.preprocess_frame(frame, pose)
+                landmarks = self.preprocess_frame(frame, pose_local)
                 if len(landmarks) == len(relevant_landmarks_indices) * 3:
                     features = self.extract_features(landmarks)
                     if len(features) == 22:
@@ -430,12 +553,11 @@ class Exercise:
                 frame_count += 1
 
                 if len(landmarks_window) == window_size:
-                    # Shape (window_size, 22); scaler expects (N, 22) per frame
                     landmarks_window_np = np.array(landmarks_window, dtype=np.float32)
                     scaled_landmarks_window = self.scaler.transform(landmarks_window_np)
                     scaled_landmarks_window = scaled_landmarks_window.reshape(1, window_size, 22).astype(np.float32)
 
-                    prediction = self.lstm_model.predict(scaled_landmarks_window)
+                    prediction = self.lstm_model.predict(scaled_landmarks_window, verbose=0)
 
                     if prediction.shape[1] != len(self.exercise_classes):
                         break
@@ -444,7 +566,6 @@ class Exercise:
                         break
                     current_prediction = self.exercise_classes[predicted_class]
                     last_predicted_class = predicted_class
-                    # Use canonical exercise name (from train_info or index fallback when model uses dataset names)
                     if current_prediction in known_exercises:
                         canonical_prediction = current_prediction
                     elif current_prediction in class_name_to_exercise and class_name_to_exercise[current_prediction] in known_exercises:
@@ -464,34 +585,52 @@ class Exercise:
                     landmarks_window = []
                     frame_count = 0
 
-                # Repetition counting logic based on current prediction
+                # Repetition counting + injury detection
                 detector.find_person(frame, draw=True)
                 landmark_list = detector.find_landmarks(frame, draw=True)
                 if len(landmark_list) > 0:
+                    # Hand-join detection to stop
+                    if self.are_hands_joined(landmark_list, stop=False):
+                        break
+
                     exercise_for_count = canonical_prediction if canonical_prediction in known_exercises else None
                     if exercise_for_count == 'push-up':
                         stages['push_up'], counters['push_up'] = count_repetition_push_up(detector, frame, landmark_list, stages['push_up'], counters['push_up'], self)
-
+                        self._update_session('push-up', counters['push_up'])
                     elif exercise_for_count == 'squat':
                         stages['squat'], counters['squat'] = count_repetition_squat(detector, frame, landmark_list, stages['squat'], counters['squat'], self)
-
+                        self._update_session('squat', counters['squat'])
                     elif exercise_for_count == 'barbell biceps curl':
                         stages['right_bicep_curl'], stages['left_bicep_curl'], counters['bicep_curl'] = count_repetition_bicep_curl(detector, frame, landmark_list, stages['right_bicep_curl'], stages['left_bicep_curl'], counters['bicep_curl'], self)
-
+                        self._update_session('barbell biceps curl', counters['bicep_curl'])
                     elif exercise_for_count == 'shoulder press':
                         stages['shoulder_press'], counters['shoulder_press'] = count_repetition_shoulder_press(detector, frame, landmark_list, stages['shoulder_press'], counters['shoulder_press'], self)
+                        self._update_session('shoulder press', counters['shoulder_press'])
 
-                    # Form tip only when prediction is stable
+                    # Injury prevention alert (highest priority)
+                    now = time.time()
+                    injury_alert = None
+                    if exercise_for_count:
+                        injury_alert = get_injury_alerts(landmark_list, exercise_for_count)
+                    if injury_alert:
+                        if injury_alert != last_injury_text or (now - last_injury_time) >= 3.0:
+                            last_injury_text = injury_alert
+                            last_injury_time = now
+                            self.voice.speak(injury_alert)
+
+                    # Form tip (lower priority, only when stable)
                     form_tip = None
                     if stable_exercise and stable_exercise in known_exercises:
                         form_tip = get_form_suggestions(landmark_list, stable_exercise)
-                    now = time.time()
                     if form_tip is None:
                         last_tip_text = None
                     elif form_tip != last_tip_text:
                         if last_tip_text is None or (now - last_tip_time) >= tip_cooldown_sec:
                             last_tip_text = form_tip
                             last_tip_time = now
+                            if not injury_alert:
+                                self.voice.speak(form_tip)
+
                 exercise_name_map = {
                     'push_up': 'Push-up',
                     'squat': 'Squat',
@@ -503,10 +642,9 @@ class Exercise:
                 num_exercises = len(counters)
                 vertical_spacing = height // (num_exercises + 1)
 
-                cv2.rectangle(frame, (0, 0), (120, height), (0, 0, 0), -1)
+                cv2.rectangle(frame, (0, 0), (140, height), (0, 0, 0), -1)
                 cv2.rectangle(frame, (0, 0), (width, 30), (0, 0, 0), -1)
 
-                # Show exercise name (Push-up, Squat, Curl, Press); never show raw model/dataset name
                 display_name = canonical_to_display.get(canonical_prediction, "Detecting...") if canonical_prediction else "Detecting..."
                 draw_styled_text(frame, f"Exercise: {display_name}", ((width - 290) // 2 + 100, 20))
 
@@ -514,7 +652,15 @@ class Exercise:
                     short_name = exercise_name_map.get(exercise, exercise)
                     draw_styled_text(frame, f"{short_name}: {count}", (10, (idx + 1) * vertical_spacing))
 
-                # Draw tip last and to the right of the left sidebar (x=130) so it is not covered
+                # Show calorie estimate
+                total_cal = sum(d['calories'] for d in self.session_data.values())
+                draw_styled_text(frame, f"Cal: {total_cal:.1f}", (10, height - 15), font_scale=0.45, font_color=(0, 255, 0), bg_color=(30, 30, 30))
+
+                # Draw injury alert (red, prominent)
+                if last_injury_text and (time.time() - last_injury_time) < 3.0:
+                    draw_styled_text(frame, last_injury_text, (130, height - 60), font_scale=0.55, font_color=(0, 0, 255), bg_color=(255, 255, 255))
+
+                # Draw form tip
                 if last_tip_text:
                     draw_styled_text(frame, f"Tip: {last_tip_text}", (130, height - 35), font_scale=0.55, font_color=(0, 255, 255), bg_color=(40, 40, 40))
 
@@ -522,7 +668,7 @@ class Exercise:
                     try:
                         stframe.image(frame, channels='BGR', use_container_width=True)
                     except Exception:
-                        pass  # skip this frame, keep going
+                        pass
                     last_draw = time.time()
                 time.sleep(0.01)
         except Exception:
@@ -535,80 +681,98 @@ class Exercise:
                     pass
             cv2.destroyAllWindows()
 
-    # Check if hands are joined together in a 'prayer' gesture
-    def are_hands_joined(self, landmark_list, stop, is_video=False):
-        # Extract wrist coordinates
-        left_wrist = landmark_list[15][1:]  # (x, y) for left wrist
-        right_wrist = landmark_list[16][1:]  # (x, y) for right wrist
+        # Show session summary
+        self._show_session_summary(status_placeholder)
 
-        # Calculate the Euclidean distance between the wrists
+    def _show_session_summary(self, placeholder=None):
+        """Display workout session summary in Streamlit."""
+        summary = self.get_session_summary()
+        if summary['total_reps'] == 0:
+            return
+        target = placeholder if placeholder else st
+        target.markdown("---")
+        target.subheader("Workout Summary")
+        cols = target.columns(3)
+        cols[0].metric("Total Reps", summary['total_reps'])
+        cols[1].metric("Calories Burned", f"{summary['total_calories']} cal")
+        duration_min = summary['duration_sec'] / 60
+        cols[2].metric("Duration", f"{duration_min:.1f} min")
+
+        if summary['exercises']:
+            target.markdown("**Breakdown by exercise:**")
+            for name, data in summary['exercises'].items():
+                display = canonical_to_display_name(name)
+                target.write(f"- **{display}**: {data['reps']} reps ({data['calories']:.1f} cal)")
+
+    def are_hands_joined(self, landmark_list, stop, is_video=False):
+        if len(landmark_list) < 17:
+            return False
+        left_wrist = landmark_list[15][1:]
+        right_wrist = landmark_list[16][1:]
         distance = np.linalg.norm(np.array(left_wrist) - np.array(right_wrist))
-        # Consider hands joined if the distance is below a certain threshold, e.g., 50 pixels
         if distance < 30 and not is_video:
             return True
-        
         return False
 
-
-    # Visualize repetitions of the exercise on screen
-    def repetitions_counter(self, img, counter):
+    def repetitions_counter(self, img, counter, exercise_name=None):
         cv2.rectangle(img, (0, 0), (225, 73), (245, 117, 16), -1)
-
-        # Rep data
         cv2.putText(img, 'REPS', (15, 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
         cv2.putText(img, str(counter),
                     (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2, cv2.LINE_AA)
+        # Show calories inline
+        if exercise_name:
+            cal = estimate_calories(exercise_name, counter)
+            cv2.putText(img, f'{cal:.1f} cal', (120, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
 
-    # Define push-up method
     def push_up(self, cap, is_video=False, counter=0, stage=None):
         self.exercise_method(cap, is_video, count_repetition_push_up, counter=counter, stage=stage, exercise_name="push-up")
 
-    # Define squat method
     def squat(self, cap, is_video=False, counter=0, stage=None):
         self.exercise_method(cap, is_video, count_repetition_squat, counter=counter, stage=stage, exercise_name="squat")
 
-    # Define bicep curl method
     def bicept_curl(self, cap, is_video=False, counter=0, stage_right=None, stage_left=None):
         self.exercise_method(cap, is_video, count_repetition_bicep_curl, multi_stage=True, counter=counter, stage_right=stage_right, stage_left=stage_left, exercise_name="barbell biceps curl")
 
-    # Define shoulder press method
     def shoulder_press(self, cap, is_video=False, counter=0, stage=None):
         self.exercise_method(cap, is_video, count_repetition_shoulder_press, counter=counter, stage=stage, exercise_name="shoulder press")
 
-    # Generic exercise method (with optional live form suggestions)
     def exercise_method(self, cap, is_video, count_repetition_function, multi_stage=False, counter=0, stage=None, stage_right=None, stage_left=None, exercise_name=None):
+        self.session_start = time.time()
         if is_video:
             stframe = st.empty()
+            summary_placeholder = st.empty()
             detector = pm.posture_detector()
 
-            # Get the original video's FPS
             original_fps = cap.get(cv2.CAP_PROP_FPS)
+            if original_fps <= 0:
+                original_fps = 30.0  # fallback FPS
             frame_time = 1 / original_fps
 
             frame_count = 0
             start_time = time.time()
             last_update_time = start_time
-
-            update_interval = 0.1  # Update display every 100ms
+            update_interval = 0.1
+            img = None
 
             while cap.isOpened():
                 current_time = time.time()
                 elapsed_time = current_time - start_time
-
-                # Determine how many frames should have been processed by now
                 target_frame = int(elapsed_time * original_fps)
 
-                # Process frames until we catch up to where we should be
                 while frame_count < target_frame:
                     ret, frame = cap.read()
                     if not ret:
+                        # Show summary before returning
+                        if exercise_name:
+                            self._update_session(exercise_name, counter)
+                        self._show_session_summary(summary_placeholder)
                         return
 
                     frame_count += 1
 
-                    # Process the last frame we read
                     if frame_count == target_frame:
                         img = detector.find_person(frame)
                         landmark_list = detector.find_landmarks(img, draw=False)
@@ -620,23 +784,33 @@ class Exercise:
                                 stage, counter = count_repetition_function(detector, img, landmark_list, stage, counter, self)
 
                             if self.are_hands_joined(landmark_list, stop=False, is_video=is_video):
+                                if exercise_name:
+                                    self._update_session(exercise_name, counter)
+                                self._show_session_summary(summary_placeholder)
                                 return
 
-                            # Live form suggestion
+                            # Injury alert
+                            if exercise_name:
+                                injury = get_injury_alerts(landmark_list, exercise_name)
+                                if injury:
+                                    h, w = img.shape[:2]
+                                    draw_styled_text(img, injury, (10, h - 55), font_scale=0.5, font_color=(0, 0, 255), bg_color=(255, 255, 255))
+                                    self.voice.speak(injury)
+
+                            # Form suggestion
                             if exercise_name:
                                 form_tip = get_form_suggestions(landmark_list, exercise_name)
                                 if form_tip:
                                     h, w = img.shape[:2]
                                     draw_styled_text(img, f"Tip: {form_tip}", (10, h - 25), font_scale=0.5, font_color=(0, 255, 255), bg_color=(40, 40, 40))
+                                    self.voice.speak(form_tip)
 
-                        self.repetitions_counter(img, counter)
+                        self.repetitions_counter(img, counter, exercise_name)
 
-                # Update display at regular intervals
-                if current_time - last_update_time >= update_interval:
+                if img is not None and current_time - last_update_time >= update_interval:
                     stframe.image(img, channels='BGR', use_container_width=True)
                     last_update_time = current_time
 
-                # Small sleep to prevent busy-waiting
                 time.sleep(0.001)
 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -644,9 +818,14 @@ class Exercise:
 
             cap.release()
             cv2.destroyAllWindows()
+            if exercise_name:
+                self._update_session(exercise_name, counter)
+            self._show_session_summary(summary_placeholder)
+
         else:
-            # Webcam exercise: warmup camera properly, then loop (retry reads so we don't exit after 1 sec)
+            # Webcam mode
             stframe = st.empty()
+            summary_placeholder = st.empty()
             webcam_start_time = time.time()
             if cap is None:
                 cap = cv2.VideoCapture(0)
@@ -659,14 +838,16 @@ class Exercise:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
-            # Warmup: read and discard ~2 sec of frames so camera is stable before we start
+            # Warmup
             for _ in range(60):
                 cap.read()
                 time.sleep(0.033)
             detector = pm.posture_detector()
             frame_interval = 1.0 / 30
             last_update = time.time()
-            read_retries = 15  # retry this many times if read fails before giving up
+            read_retries = 15
+            last_injury_text = None
+            last_injury_time = 0.0
 
             try:
                 while cap.isOpened():
@@ -697,16 +878,31 @@ class Exercise:
                                 stage_right, stage_left, counter = count_repetition_function(detector, img, landmark_list, stage_right, stage_left, counter, self)
                             else:
                                 stage, counter = count_repetition_function(detector, img, landmark_list, stage, counter, self)
+
+                            # Injury prevention
+                            if exercise_name:
+                                injury = get_injury_alerts(landmark_list, exercise_name)
+                                if injury:
+                                    if injury != last_injury_text or (now - last_injury_time) >= 3.0:
+                                        last_injury_text = injury
+                                        last_injury_time = now
+                                        self.voice.speak(injury)
+                                    h, w = img.shape[:2]
+                                    draw_styled_text(img, injury, (10, h - 55), font_scale=0.5, font_color=(0, 0, 255), bg_color=(255, 255, 255))
+
+                            # Form tips
                             if exercise_name:
                                 form_tip = get_form_suggestions(landmark_list, exercise_name)
                                 if form_tip:
                                     h, w = img.shape[:2]
                                     draw_styled_text(img, f"Tip: {form_tip}", (10, h - 25), font_scale=0.5, font_color=(0, 255, 255), bg_color=(40, 40, 40))
+                                    if not last_injury_text or (now - last_injury_time) >= 3.0:
+                                        self.voice.speak(form_tip)
 
-                        self.repetitions_counter(img, counter)
+                        self.repetitions_counter(img, counter, exercise_name)
                         stframe.image(img, channels='BGR', use_container_width=True)
                     except Exception:
-                        continue  # skip bad frame, keep exercising
+                        continue
             except Exception:
                 pass
             finally:
@@ -716,9 +912,23 @@ class Exercise:
                     except Exception:
                         pass
                 cv2.destroyAllWindows()
+                if exercise_name:
+                    self._update_session(exercise_name, counter)
+                self._show_session_summary(summary_placeholder)
                 try:
                     ran_sec = time.time() - webcam_start_time
                     if ran_sec < 3:
                         stframe.warning("Camera not ready or stopped quickly. Click **Start Exercise** to try again.")
                 except Exception:
                     pass
+
+
+def canonical_to_display_name(name):
+    """Convert canonical exercise name to display name."""
+    mapping = {
+        'push-up': 'Push-up',
+        'squat': 'Squat',
+        'barbell biceps curl': 'Bicep Curl',
+        'shoulder press': 'Shoulder Press',
+    }
+    return mapping.get(name, name.title())

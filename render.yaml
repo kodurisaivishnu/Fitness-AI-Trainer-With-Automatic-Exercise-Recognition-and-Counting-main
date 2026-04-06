@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: fitness-ai-coach
+    runtime: docker
+    plan: standard
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: STREAMLIT_SERVER_HEADLESS
+        value: "true"
+      - key: STREAMLIT_SERVER_PORT
+        value: "8501"
+    dockerfilePath: ./Dockerfile
+    dockerContext: .

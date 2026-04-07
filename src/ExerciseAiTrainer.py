@@ -932,3 +932,14 @@ def canonical_to_display_name(name):
         'shoulder press': 'Shoulder Press',
     }
     return mapping.get(name, name.title())
+
+
+# --- Cached model loading (call from main.py / webrtc_processor.py) ---
+_cached_exercise = None
+
+def get_cached_exercise():
+    """Return a singleton Exercise instance so the model loads only once."""
+    global _cached_exercise
+    if _cached_exercise is None:
+        _cached_exercise = Exercise()
+    return _cached_exercise

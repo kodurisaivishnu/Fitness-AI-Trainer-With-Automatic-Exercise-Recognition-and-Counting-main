@@ -40,58 +40,84 @@ ASSETS_VIDEOS = ROOT / "assets" / "videos"
 DEMO_VIDEO = ASSETS_VIDEOS / "demo_2.mp4"
 MODELS_DIR = ROOT / "models"
 
-def _get_rtc_configuration():
-    """Build RTC config from env vars TURN_URL, TURN_USERNAME, TURN_CREDENTIAL."""
-    if not _WEBRTC_AVAILABLE:
-        return None
+def _fetch_metered_ice_servers(api_key):
+    """Fetch fresh TURN credentials from Metered REST API."""
+    import requests as req
+    try:
+        resp = req.get(
+            f"https://fitness.metered.live/api/v1/turn/credentials?apiKey={api_key}",
+            timeout=5
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    # Fallback: try the generic endpoint
+    try:
+        resp = req.get(
+            f"https://global.relay.metered.ca/api/v1/turn/credentials?apiKey={api_key}",
+            timeout=5
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return None
 
+
+def _get_rtc_configuration():
+    """Build RTC config. Uses METERED_API_KEY to fetch fresh TURN credentials."""
+    if not _WEBRTC_AVAILABLE:
+        return None, False
+
+    api_key = os.environ.get("METERED_API_KEY", "")
+    ice_servers = None
+
+    # Method 1: Fetch from Metered API (best - gives fresh rotating credentials)
+    if api_key:
+        ice_servers = _fetch_metered_ice_servers(api_key)
+
+    if ice_servers:
+        return RTCConfiguration({"iceServers": ice_servers}), True
+
+    # Method 2: Manual TURN config from env vars
     turn_url = os.environ.get("TURN_URL", "")
     turn_user = os.environ.get("TURN_USERNAME", "")
     turn_cred = os.environ.get("TURN_CREDENTIAL", "")
 
-    ice_servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
-
     if turn_url and turn_user and turn_cred:
-        # Add all protocol variants for maximum compatibility
-        ice_servers.extend([
+        servers = [
+            {"urls": ["stun:stun.l.google.com:19302"]},
             {"urls": [turn_url], "username": turn_user, "credential": turn_cred},
             {"urls": [turn_url + "?transport=tcp"], "username": turn_user, "credential": turn_cred},
-        ])
-        # Add TURNS (TLS) variant on port 443
-        turns_url = turn_url.replace("turn:", "turns:").split("?")[0]
-        if ":80" in turns_url:
-            turns_url = turns_url.replace(":80", ":443")
-        elif ":443" not in turns_url:
-            turns_url += ":443"
-        ice_servers.append({"urls": [turns_url + "?transport=tcp"], "username": turn_user, "credential": turn_cred})
+        ]
+        return RTCConfiguration({"iceServers": servers}), True
 
-    return RTCConfiguration({"iceServers": ice_servers})
+    # Method 3: STUN only (works locally, NOT on cloud behind NAT)
+    return RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}), False
 
-RTC_CONFIGURATION = _get_rtc_configuration()
-_TURN_CONFIGURED = bool(os.environ.get("TURN_URL", ""))
+
+RTC_CONFIGURATION, _TURN_CONFIGURED = _get_rtc_configuration()
 
 def _show_turn_help():
-    st.warning("**WebCam requires a TURN server on cloud.**")
+    st.warning("**WebCam needs a TURN server to work on cloud.**")
     st.markdown("""
 ### Setup (free, 2 minutes):
 
-**Step 1:** Go to [metered.ca](https://www.metered.ca/stun-turn) → Click **"Sign Up Free"**
+**Step 1:** Go to [metered.ca/stun-turn](https://www.metered.ca/stun-turn) → Click **"Sign Up Free"**
 
-**Step 2:** After signup, go to your Dashboard → **"TURN Server"** tab → you'll see:
-- An **API Key** (something like `a1b2c3d4e5f6...`)
+**Step 2:** After signup, go to Dashboard → Click **"TURN Server"** → Copy your **API Key**
 
-**Step 3:** In your **Render Dashboard** → your service → **Environment** tab → add:
+**Step 3:** In **Render Dashboard** → your service → **Environment** tab → add **ONE** variable:
 
 | Key | Value |
 |-----|-------|
-| `TURN_URL` | `turn:standard.relay.metered.ca:80` |
-| `TURN_USERNAME` | *(API key from Step 2)* |
-| `TURN_CREDENTIAL` | *(API key from Step 2)* |
+| `METERED_API_KEY` | *(paste your API key from Step 2)* |
 
-**Step 4:** Click **"Save Changes"** in Render → it auto-redeploys.
+**Step 4:** Click **"Save Changes"** → Render auto-redeploys → WebCam works!
 
 ---
-**Use Video mode in the meantime** - upload any exercise video and AI will analyze it!
+**Use Video mode now** - upload any exercise video and the AI will analyze it!
 """)
 
 EXERCISE_NAME_MAP = {

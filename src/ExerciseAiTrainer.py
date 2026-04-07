@@ -39,9 +39,8 @@ _MODEL_TFLITE = _MODELS_DIR / "exercise_classifier.tflite"
 _SCALER_PKL = _MODELS_DIR / "thesis_bidirectionallstm_scaler.pkl"
 _LABEL_ENCODER_PKL = _MODELS_DIR / "thesis_bidirectionallstm_label_encoder.pkl"
 
-# Initialize MediaPipe pose
+# MediaPipe pose references (no global Pose() instance - saves ~50MB)
 mp_pose = mp.solutions.pose
-pose = mp_pose.Pose()
 
 # Define relevant landmarks indices
 relevant_landmarks_indices = [
@@ -669,7 +668,7 @@ class Exercise:
 
                 if time.time() - last_draw >= frame_interval:
                     try:
-                        stframe.image(frame, channels='BGR', use_container_width=True)
+                        stframe.image(frame, channels='BGR', use_column_width=True)
                     except Exception:
                         pass
                     last_draw = time.time()
@@ -811,7 +810,7 @@ class Exercise:
                         self.repetitions_counter(img, counter, exercise_name)
 
                 if img is not None and current_time - last_update_time >= update_interval:
-                    stframe.image(img, channels='BGR', use_container_width=True)
+                    stframe.image(img, channels='BGR', use_column_width=True)
                     last_update_time = current_time
 
                 time.sleep(0.001)
@@ -903,7 +902,7 @@ class Exercise:
                                         self.voice.speak(form_tip)
 
                         self.repetitions_counter(img, counter, exercise_name)
-                        stframe.image(img, channels='BGR', use_container_width=True)
+                        stframe.image(img, channels='BGR', use_column_width=True)
                     except Exception:
                         continue
             except Exception:

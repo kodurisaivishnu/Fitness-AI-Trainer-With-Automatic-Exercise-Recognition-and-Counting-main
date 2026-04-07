@@ -1,12 +1,16 @@
 """
 WebRTC video processors for browser-based webcam access.
-Uses streamlit-webrtc so webcam works even when deployed to cloud (Render, etc.)
 """
 import cv2
 import numpy as np
 import time
 import threading
 import av
+import traceback
+
+# Track import errors to show on video frame
+_IMPORT_ERROR = ""
+_IMPORTS_OK = False
 
 try:
     import mediapipe as mp
@@ -19,8 +23,13 @@ try:
         estimate_calories, canonical_to_display_name,
     )
     _IMPORTS_OK = True
-except Exception:
-    _IMPORTS_OK = False
+except Exception as e:
+    _IMPORT_ERROR = f"{type(e).__name__}: {e}"
+
+
+def _put_text(img, text, y, color=(255, 255, 255), scale=0.6):
+    """Draw text with background on frame."""
+    cv2.putText(img, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 2, cv2.LINE_AA)
 
 
 class WebRTCExerciseProcessor:
@@ -30,14 +39,6 @@ class WebRTCExerciseProcessor:
         self._lock = threading.Lock()
         self.exercise_name = "push-up"
         self.multi_stage = False
-
-        if _IMPORTS_OK:
-            self.detector = pm.posture_detector()
-            self.exercise_instance = get_cached_exercise()
-        else:
-            self.detector = None
-            self.exercise_instance = None
-
         self.counter = 0
         self.stage = None
         self.stage_right = None
@@ -47,15 +48,23 @@ class WebRTCExerciseProcessor:
         self.last_tip_time = 0.0
         self.last_injury_time = 0.0
         self.session_start = time.time()
-
+        self._init_error = ""
+        self.detector = None
+        self.exercise_instance = None
         self._count_funcs = {}
+
         if _IMPORTS_OK:
-            self._count_funcs = {
-                "push-up": count_repetition_push_up,
-                "squat": count_repetition_squat,
-                "barbell biceps curl": count_repetition_bicep_curl,
-                "shoulder press": count_repetition_shoulder_press,
-            }
+            try:
+                self.detector = pm.posture_detector()
+                self.exercise_instance = get_cached_exercise()
+                self._count_funcs = {
+                    "push-up": count_repetition_push_up,
+                    "squat": count_repetition_squat,
+                    "barbell biceps curl": count_repetition_bicep_curl,
+                    "shoulder press": count_repetition_shoulder_press,
+                }
+            except Exception as e:
+                self._init_error = f"Init: {e}"
 
     def set_exercise(self, exercise_name):
         with self._lock:
@@ -68,7 +77,12 @@ class WebRTCExerciseProcessor:
 
     def get_state(self):
         with self._lock:
-            cal = estimate_calories(self.exercise_name, self.counter) if _IMPORTS_OK else 0
+            cal = 0
+            if _IMPORTS_OK:
+                try:
+                    cal = estimate_calories(self.exercise_name, self.counter)
+                except Exception:
+                    pass
             return {
                 "counter": self.counter,
                 "exercise": self.exercise_name,
@@ -81,7 +95,18 @@ class WebRTCExerciseProcessor:
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
 
-        if not _IMPORTS_OK or not self.detector:
+        # Show import/init errors on the video frame so user can see what's wrong
+        if not _IMPORTS_OK:
+            _put_text(img, "Import Error:", 30, (0, 0, 255))
+            _put_text(img, _IMPORT_ERROR[:80], 60, (0, 0, 255), 0.5)
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        if self._init_error:
+            _put_text(img, f"Init Error: {self._init_error[:80]}", 30, (0, 0, 255))
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        if not self.detector:
+            _put_text(img, "Detector not ready", 30, (0, 0, 255))
             return av.VideoFrame.from_ndarray(img, format="bgr24")
 
         try:
@@ -146,8 +171,9 @@ class WebRTCExerciseProcessor:
             if tip_text:
                 draw_styled_text(img, f"Tip: {tip_text}", (10, h - 25), font_scale=0.55, font_color=(0, 255, 255), bg_color=(40, 40, 40))
 
-        except Exception:
-            pass  # Return frame as-is on any error
+        except Exception as e:
+            # Show error on frame instead of black screen
+            _put_text(img, f"Error: {str(e)[:70]}", 30, (0, 0, 255))
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -158,20 +184,26 @@ class WebRTCAutoClassifyProcessor:
     def __init__(self):
         self._lock = threading.Lock()
         self.model_ready = False
+        self._init_error = ""
+        self.detector = None
+        self.exercise_instance = None
+        self.pose_for_features = None
 
         if _IMPORTS_OK:
-            self.detector = pm.posture_detector()
-            self.exercise_instance = get_cached_exercise()
-            self.pose_for_features = mp.solutions.pose.Pose()
-            self.model_ready = (
-                self.exercise_instance.lstm_model is not None
-                and self.exercise_instance.scaler is not None
-                and self.exercise_instance.label_encoder is not None
-            )
-        else:
-            self.detector = None
-            self.exercise_instance = None
-            self.pose_for_features = None
+            try:
+                self.detector = pm.posture_detector()
+                self.exercise_instance = get_cached_exercise()
+                self.pose_for_features = mp.solutions.pose.Pose()
+                self.model_ready = (
+                    self.exercise_instance.lstm_model is not None
+                    and self.exercise_instance.scaler is not None
+                    and self.exercise_instance.label_encoder is not None
+                )
+                if not self.model_ready:
+                    errs = self.exercise_instance._load_error
+                    self._init_error = "; ".join(f"{c}: {e}" for c, e in errs) if errs else "Model files missing"
+            except Exception as e:
+                self._init_error = str(e)
 
         self.window_size = 30
         self.landmarks_window = []
@@ -216,12 +248,18 @@ class WebRTCAutoClassifyProcessor:
             for key, count in self.counters.items():
                 if count > 0:
                     ex_name = exercise_cal_map.get(key, key)
-                    cal = estimate_calories(ex_name, count) if _IMPORTS_OK else 0
+                    try:
+                        cal = estimate_calories(ex_name, count) if _IMPORTS_OK else 0
+                    except Exception:
+                        cal = 0
                     total_cal += cal
                     breakdown[exercise_name_map.get(key, key)] = {"reps": count, "calories": round(cal, 1)}
             pred_name = "Detecting..."
             if _IMPORTS_OK and self.canonical_prediction:
-                pred_name = canonical_to_display_name(self.canonical_prediction)
+                try:
+                    pred_name = canonical_to_display_name(self.canonical_prediction)
+                except Exception:
+                    pred_name = self.canonical_prediction
             return {
                 "prediction": pred_name,
                 "counters": dict(self.counters),
@@ -232,20 +270,28 @@ class WebRTCAutoClassifyProcessor:
                 "duration": time.time() - self.session_start,
                 "breakdown": breakdown,
                 "model_ready": self.model_ready,
+                "error": self._init_error or _IMPORT_ERROR,
             }
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
 
-        if not _IMPORTS_OK or not self.model_ready:
-            h, w = img.shape[:2]
-            cv2.putText(img, "Model not loaded", (10, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        if not _IMPORTS_OK:
+            _put_text(img, "Import Error:", 30, (0, 0, 255))
+            _put_text(img, _IMPORT_ERROR[:80], 60, (0, 0, 255), 0.5)
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        if self._init_error:
+            _put_text(img, f"Error: {self._init_error[:80]}", 30, (0, 0, 255))
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        if not self.model_ready:
+            _put_text(img, "Model not loaded", 30, (0, 0, 255))
             return av.VideoFrame.from_ndarray(img, format="bgr24")
 
         try:
             ex = self.exercise_instance
 
-            # Feature extraction for classification
             landmarks = ex.preprocess_frame(img, self.pose_for_features)
             if len(landmarks) == len(relevant_landmarks_indices) * 3:
                 features = ex.extract_features(landmarks)
@@ -266,7 +312,7 @@ class WebRTCAutoClassifyProcessor:
                 scaled = scaled.reshape(1, self.window_size, 22).astype(np.float32)
                 prediction = ex.predict(scaled)
 
-                if prediction.shape[1] == len(ex.exercise_classes):
+                if prediction is not None and prediction.shape[1] == len(ex.exercise_classes):
                     predicted_class = np.argmax(prediction, axis=1)[0]
                     if predicted_class < len(ex.exercise_classes):
                         current_pred = ex.exercise_classes[predicted_class]
@@ -347,7 +393,7 @@ class WebRTCAutoClassifyProcessor:
             if tip_text:
                 draw_styled_text(img, f"Tip: {tip_text}", (130, h - 35), font_scale=0.55, font_color=(0, 255, 255), bg_color=(40, 40, 40))
 
-        except Exception:
-            pass
+        except Exception as e:
+            _put_text(img, f"Error: {str(e)[:70]}", 30, (0, 0, 255))
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")

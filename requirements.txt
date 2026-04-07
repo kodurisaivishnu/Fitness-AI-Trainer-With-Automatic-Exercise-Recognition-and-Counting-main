@@ -1,5 +1,6 @@
-# TFLite runtime (~2MB) instead of full TensorFlow (~400MB)
-tflite-runtime==2.14.0
+# TFLite - lightweight inference (~30MB vs TensorFlow 400MB)
+# ai-edge-litert is Google's new TFLite package (works on all Python versions)
+ai-edge-litert>=1.0.1
 numpy==1.26.4
 scikit-learn==1.5.0
 joblib==1.4.2

@@ -11,12 +11,28 @@ import json
 import threading
 from pathlib import Path
 
-# Use TFLite runtime (~2MB) instead of full TensorFlow (~400MB)
+# Use TFLite interpreter - try multiple packages (only need ~2-30MB, not full TF 400MB)
+_TFLITE_AVAILABLE = False
+tflite = None
 try:
-    import tflite_runtime.interpreter as tflite
+    # Option 1: tflite-runtime (official lightweight package)
+    import tflite_runtime.interpreter as _tfl
+    tflite = _tfl
     _TFLITE_AVAILABLE = True
 except ImportError:
-    _TFLITE_AVAILABLE = False
+    try:
+        # Option 2: ai-edge-litert (Google's new replacement)
+        from ai_edge_litert import interpreter as _tfl
+        tflite = _tfl
+        _TFLITE_AVAILABLE = True
+    except ImportError:
+        try:
+            # Option 3: Full TF (fallback, uses more RAM)
+            import tensorflow as tf
+            tflite = tf.lite
+            _TFLITE_AVAILABLE = True
+        except ImportError:
+            pass
 
 # Optional voice feedback
 try:

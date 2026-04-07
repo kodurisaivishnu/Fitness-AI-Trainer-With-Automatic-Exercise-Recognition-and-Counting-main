@@ -20,10 +20,10 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install Python dependencies
-# Use opencv-python-headless on server (no GUI needed)
+# opencv-python-headless for server (no GUI needed, smaller)
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir opencv-python-headless
+    pip install --no-cache-dir opencv-python-headless==4.9.0.80 && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy project files
 COPY . .

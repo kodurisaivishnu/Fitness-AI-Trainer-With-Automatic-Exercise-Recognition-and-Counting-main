@@ -264,7 +264,7 @@ class WebRTCAutoClassifyProcessor:
                 lw_np = np.array(lw, dtype=np.float32)
                 scaled = ex.scaler.transform(lw_np)
                 scaled = scaled.reshape(1, self.window_size, 22).astype(np.float32)
-                prediction = ex.lstm_model.predict(scaled, verbose=0)
+                prediction = ex.predict(scaled)
 
                 if prediction.shape[1] == len(ex.exercise_classes):
                     predicted_class = np.argmax(prediction, axis=1)[0]

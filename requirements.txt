@@ -1,6 +1,5 @@
-# Core ML - tensorflow-cpu is ~200MB smaller than tensorflow
-tensorflow-cpu==2.16.1
-keras==3.3.3
+# TFLite runtime (~2MB) instead of full TensorFlow (~400MB)
+tflite-runtime==2.14.0
 numpy==1.26.4
 scikit-learn==1.5.0
 joblib==1.4.2

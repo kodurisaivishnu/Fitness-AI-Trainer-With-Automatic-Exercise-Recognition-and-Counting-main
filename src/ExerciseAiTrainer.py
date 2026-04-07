@@ -1,33 +1,22 @@
 import os
-# Limit TF memory BEFORE importing tensorflow
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'          # suppress TF logs
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'          # reduce memory
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'           # CPU only, no GPU mem
-
 import cv2
 import PoseModule2 as pm
 import numpy as np
 import streamlit as st
 from AiTrainer_utils import *
 import joblib
-import tensorflow as tf
-
-# Limit TF to use minimal memory
-tf.config.set_visible_devices([], 'GPU')  # force CPU
-try:
-    # Prevent TF from pre-allocating all memory
-    for gpu in tf.config.list_physical_devices('GPU'):
-        tf.config.experimental.set_memory_growth(gpu, True)
-except Exception:
-    pass
-
-from tensorflow.keras.models import load_model
-from tensorflow import keras
 import mediapipe as mp
 import time
 import json
 import threading
 from pathlib import Path
+
+# Use TFLite runtime (~2MB) instead of full TensorFlow (~400MB)
+try:
+    import tflite_runtime.interpreter as tflite
+    _TFLITE_AVAILABLE = True
+except ImportError:
+    _TFLITE_AVAILABLE = False
 
 # Optional voice feedback
 try:
@@ -46,8 +35,7 @@ class LabelEncoderCompat:
     def __init__(self, classes):
         self.classes_ = np.array(classes)
 
-_MODEL_H5 = _MODELS_DIR / "final_forthesis_bidirectionallstm_and_encoders_exercise_classifier_model.h5"
-_MODEL_KERAS = _MODELS_DIR / "final_forthesis_bidirectionallstm_and_encoders_exercise_classifier_model.keras"
+_MODEL_TFLITE = _MODELS_DIR / "exercise_classifier.tflite"
 _SCALER_PKL = _MODELS_DIR / "thesis_bidirectionallstm_scaler.pkl"
 _LABEL_ENCODER_PKL = _MODELS_DIR / "thesis_bidirectionallstm_label_encoder.pkl"
 
@@ -341,37 +329,28 @@ def count_repetition_shoulder_press(detector, img, landmark_list, stage, counter
 
 class Exercise:
     def __init__(self):
-        self.lstm_model = None
+        self.lstm_model = None       # TFLite interpreter
+        self._input_details = None
+        self._output_details = None
         self._load_error = []
         self.voice = VoiceFeedback(enabled=True)
         self.session_start = None
-        self.session_data = {}  # exercise_name -> {'reps': N, 'calories': float}
+        self.session_data = {}
 
-        # Try .keras first; then .h5
-        for path in (_MODEL_KERAS, _MODEL_H5):
-            if not path.exists():
-                continue
-            last_err = None
+        # Load TFLite model (~400KB, uses ~30MB RAM vs ~400MB for full TF)
+        if _TFLITE_AVAILABLE and _MODEL_TFLITE.exists():
             try:
-                self.lstm_model = load_model(str(path), compile=False)
+                self.lstm_model = tflite.Interpreter(model_path=str(_MODEL_TFLITE))
+                self.lstm_model.allocate_tensors()
+                self._input_details = self.lstm_model.get_input_details()
+                self._output_details = self.lstm_model.get_output_details()
             except Exception as e:
-                last_err = e
-                try:
-                    self.lstm_model = load_model(str(path))
-                except Exception as e2:
-                    last_err = e2
-                    try:
-                        self.lstm_model = keras.saving.load_model(str(path), compile=False)
-                    except Exception as e3:
-                        last_err = e3
-                        try:
-                            self.lstm_model = keras.saving.load_model(str(path))
-                        except Exception as e4:
-                            last_err = e4
-            if self.lstm_model is not None:
-                break
-            if last_err is not None:
-                self._load_error.append(("model", str(last_err)))
+                self.lstm_model = None
+                self._load_error.append(("model", str(e)))
+        elif not _MODEL_TFLITE.exists():
+            self._load_error.append(("model", f"TFLite model not found at {_MODEL_TFLITE}"))
+        elif not _TFLITE_AVAILABLE:
+            self._load_error.append(("model", "tflite-runtime not installed"))
 
         try:
             self.scaler = joblib.load(str(_SCALER_PKL))
@@ -471,6 +450,14 @@ class Exercise:
         else:
             pt = (0, 0)
         cv2.putText(img, str(int(angle)), pt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+
+    def predict(self, input_data):
+        """Run inference using TFLite. input_data shape: (1, 30, 22)."""
+        if self.lstm_model is None:
+            return None
+        self.lstm_model.set_tensor(self._input_details[0]['index'], input_data)
+        self.lstm_model.invoke()
+        return self.lstm_model.get_tensor(self._output_details[0]['index'])
 
     def _update_session(self, exercise_name, counter):
         """Track session data for summary."""
@@ -573,7 +560,7 @@ class Exercise:
                     scaled_landmarks_window = self.scaler.transform(landmarks_window_np)
                     scaled_landmarks_window = scaled_landmarks_window.reshape(1, window_size, 22).astype(np.float32)
 
-                    prediction = self.lstm_model.predict(scaled_landmarks_window, verbose=0)
+                    prediction = self.predict(scaled_landmarks_window)
 
                     if prediction.shape[1] != len(self.exercise_classes):
                         break

@@ -44,14 +44,26 @@ if _WEBRTC_AVAILABLE:
     RTC_CONFIGURATION = RTCConfiguration(
         {"iceServers": [
             {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun.relay.metered.ca:80"]},
             {
-                "urls": [
-                    "turn:openrelay.metered.ca:80",
-                    "turn:openrelay.metered.ca:443",
-                    "turn:openrelay.metered.ca:443?transport=tcp",
-                ],
-                "username": "openrelayproject",
-                "credential": "openrelayproject",
+                "urls": ["turn:global.relay.metered.ca:80"],
+                "username": "e8dd65b92aad406e93f6e420",
+                "credential": "VhU/ai0UYjpIaOam",
+            },
+            {
+                "urls": ["turn:global.relay.metered.ca:80?transport=tcp"],
+                "username": "e8dd65b92aad406e93f6e420",
+                "credential": "VhU/ai0UYjpIaOam",
+            },
+            {
+                "urls": ["turn:global.relay.metered.ca:443"],
+                "username": "e8dd65b92aad406e93f6e420",
+                "credential": "VhU/ai0UYjpIaOam",
+            },
+            {
+                "urls": ["turns:global.relay.metered.ca:443?transport=tcp"],
+                "username": "e8dd65b92aad406e93f6e420",
+                "credential": "VhU/ai0UYjpIaOam",
             },
         ]}
     )

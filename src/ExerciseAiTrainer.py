@@ -1,3 +1,9 @@
+import os
+# Limit TF memory BEFORE importing tensorflow
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'          # suppress TF logs
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'          # reduce memory
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'           # CPU only, no GPU mem
+
 import cv2
 import PoseModule2 as pm
 import numpy as np
@@ -5,6 +11,16 @@ import streamlit as st
 from AiTrainer_utils import *
 import joblib
 import tensorflow as tf
+
+# Limit TF to use minimal memory
+tf.config.set_visible_devices([], 'GPU')  # force CPU
+try:
+    # Prevent TF from pre-allocating all memory
+    for gpu in tf.config.list_physical_devices('GPU'):
+        tf.config.experimental.set_memory_growth(gpu, True)
+except Exception:
+    pass
+
 from tensorflow.keras.models import load_model
 from tensorflow import keras
 import mediapipe as mp

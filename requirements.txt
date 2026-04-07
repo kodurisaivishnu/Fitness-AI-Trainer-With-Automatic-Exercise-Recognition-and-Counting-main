@@ -1,12 +1,10 @@
-# Core ML
-tensorflow==2.16.1
+# Core ML - tensorflow-cpu is ~200MB smaller than tensorflow
+tensorflow-cpu==2.16.1
 keras==3.3.3
 numpy==1.26.4
 scikit-learn==1.5.0
 joblib==1.4.2
 h5py==3.11.0
-scipy==1.13.1
-pandas==2.2.2
 
 # Pose estimation
 mediapipe==0.10.14
@@ -30,6 +28,5 @@ pyttsx3==2.98
 
 # Utilities
 protobuf==4.25.3
-tqdm==4.66.4
 pyyaml==6.0.1
 requests==2.32.1

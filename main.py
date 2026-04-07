@@ -8,26 +8,29 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 import streamlit as st
+
+# MUST be first Streamlit command
+st.set_page_config(page_title='Fitness AI Coach', layout='centered', page_icon="💪")
+
 import cv2
 import tempfile
 import time
 
-# Cache heavy imports so they only load once
-@st.cache_resource
-def _load_exercise_module():
-    import ExerciseAiTrainer as exercise
-    # Pre-load the model once at startup
-    exercise.get_cached_exercise()
-    return exercise
+# Lazy imports - don't load TF/mediapipe until needed
+_exercise_module = None
+def _get_exercise():
+    global _exercise_module
+    if _exercise_module is None:
+        import ExerciseAiTrainer as ex
+        _exercise_module = ex
+    return _exercise_module
 
-exercise = _load_exercise_module()
 from chatbot import chat_ui
 
-# WebRTC for browser webcam (works on cloud deployments)
+# WebRTC
 _WEBRTC_AVAILABLE = False
 try:
     from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-    from webrtc_processor import WebRTCExerciseProcessor, WebRTCAutoClassifyProcessor
     _WEBRTC_AVAILABLE = True
 except Exception:
     pass
@@ -36,13 +39,11 @@ ASSETS_VIDEOS = ROOT / "assets" / "videos"
 DEMO_VIDEO = ASSETS_VIDEOS / "demo_2.mp4"
 MODELS_DIR = ROOT / "models"
 
-# TURN + STUN servers for WebRTC (STUN alone fails behind Render's NAT)
 RTC_CONFIGURATION = None
 if _WEBRTC_AVAILABLE:
     RTC_CONFIGURATION = RTCConfiguration(
         {"iceServers": [
             {"urls": ["stun:stun.l.google.com:19302"]},
-            {"urls": ["stun:stun1.l.google.com:19302"]},
             {
                 "urls": [
                     "turn:openrelay.metered.ca:80",
@@ -77,40 +78,28 @@ def _read_accuracy_from_metrics_file(path):
 def _show_model_metrics_in_sidebar():
     st.sidebar.markdown("---")
     st.sidebar.subheader("Model Status")
-    info_path = MODELS_DIR / "train_info.json"
-    metrics_path = MODELS_DIR / "train_metrics.txt"
-    metrics_prev_path = MODELS_DIR / "train_metrics_previous.txt"
     model_h5 = MODELS_DIR / "final_forthesis_bidirectionallstm_and_encoders_exercise_classifier_model.h5"
     model_keras = MODELS_DIR / "final_forthesis_bidirectionallstm_and_encoders_exercise_classifier_model.keras"
     has_model = model_h5.exists() or model_keras.exists()
     if not has_model:
         st.sidebar.warning("No model found. Run training first.")
         return
-    loaded_file = model_keras.name if model_keras.exists() else model_h5.name
-    st.sidebar.success("Model loaded")
-    st.sidebar.caption(f"`{loaded_file}`")
-    source = "pre-trained"
-    architecture = None
-    current_acc = None
+    st.sidebar.success("Model ready")
+    info_path = MODELS_DIR / "train_info.json"
     if info_path.exists():
         try:
             info = json.loads(info_path.read_text())
-            source = info.get("source", source)
-            architecture = info.get("architecture")
-            current_acc = info.get("test_accuracy")
+            acc = info.get("test_accuracy")
+            if acc:
+                st.sidebar.metric("Accuracy", f"{acc * 100:.2f}%")
         except Exception:
             pass
-    current_acc = current_acc or _read_accuracy_from_metrics_file(metrics_path)
-    if architecture:
-        st.sidebar.caption(f"**Arch:** {architecture}")
-    if current_acc is not None:
-        st.sidebar.metric("Accuracy", f"{current_acc * 100:.2f}%")
     st.sidebar.markdown("---")
 
 
 def _webrtc_exercise_mode(exercise_display_name):
-    """WebCam mode using WebRTC - works on cloud."""
     exercise_canonical = EXERCISE_NAME_MAP.get(exercise_display_name, "push-up")
+    from webrtc_processor import WebRTCExerciseProcessor
 
     ctx = webrtc_streamer(
         key=f"exercise-{exercise_canonical}",
@@ -124,8 +113,8 @@ def _webrtc_exercise_mode(exercise_display_name):
     if ctx.video_processor:
         ctx.video_processor.set_exercise(exercise_canonical)
 
-    # Show stats (non-blocking - Streamlit reruns handle updates)
     if ctx.state.playing and ctx.video_processor:
+        exercise = _get_exercise()
         state = ctx.video_processor.get_state()
         cols = st.columns(4)
         cols[0].metric("Reps", state["counter"])
@@ -139,7 +128,8 @@ def _webrtc_exercise_mode(exercise_display_name):
 
 
 def _webrtc_auto_classify_mode():
-    """Auto Classify mode using WebRTC."""
+    from webrtc_processor import WebRTCAutoClassifyProcessor
+
     ctx = webrtc_streamer(
         key="auto-classify",
         mode=WebRtcMode.SENDRECV,
@@ -153,7 +143,6 @@ def _webrtc_auto_classify_mode():
         if not ctx.video_processor.model_ready:
             st.error("Model not loaded. Check **models/** directory.")
             return
-
         state = ctx.video_processor.get_state()
         cols = st.columns(4)
         cols[0].metric("Detected", state["prediction"])
@@ -170,8 +159,6 @@ def _webrtc_auto_classify_mode():
 
 
 def main():
-    st.set_page_config(page_title='Fitness AI Coach', layout='centered', page_icon="💪")
-
     css_path = ROOT / "static" / "styles.css"
     if css_path.exists():
         with open(css_path, "r") as f:
@@ -184,7 +171,7 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Settings")
-    voice_enabled = st.sidebar.checkbox("Voice Feedback", value=False, help="Voice works in local mode only")
+    voice_enabled = st.sidebar.checkbox("Voice Feedback", value=False, help="Local mode only")
     user_weight = st.sidebar.number_input("Weight (kg)", min_value=30, max_value=200, value=70, step=1)
 
     options = st.sidebar.selectbox('Mode', ('Video', 'WebCam', 'Auto Classify', 'Chatbot'))
@@ -218,6 +205,7 @@ def main():
             st.video(video_path_for_display)
 
         if cap is not None and cap.isOpened():
+            exercise = _get_exercise()
             exer = exercise.Exercise()
             exer.voice.enabled = voice_enabled
             if exercise_options == 'Bicep Curl':
@@ -241,6 +229,7 @@ def main():
             st.caption("Click Start. Webcam runs until you refresh.")
             if st.button('Start Exercise', type="primary"):
                 time.sleep(1)
+                exercise = _get_exercise()
                 exer = exercise.Exercise()
                 exer.voice.enabled = voice_enabled
                 if exercise_general == 'Bicep Curl':
@@ -260,6 +249,7 @@ def main():
             st.caption("Join hands to stop.")
             if st.button('Start Auto Classification', type="primary"):
                 time.sleep(1)
+                exercise = _get_exercise()
                 exer = exercise.Exercise()
                 exer.voice.enabled = voice_enabled
                 exer.auto_classify_and_count()

@@ -16,23 +16,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy requirements first for Docker layer caching
 COPY requirements.txt .
 
-# Install Python dependencies
-# opencv-python-headless for server (no GUI needed, smaller)
+# Install deps - opencv-headless (smaller, no GUI)
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir opencv-python-headless==4.9.0.80 && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy project files
 COPY . .
 
-# Render sets PORT env var; default to 10000 (Render's default)
+# Memory optimization env vars
+ENV TF_CPP_MIN_LOG_LEVEL=3
+ENV TF_ENABLE_ONEDNN_OPTS=0
+ENV CUDA_VISIBLE_DEVICES=-1
+ENV PYTHONUNBUFFERED=1
+ENV MALLOC_TRIM_THRESHOLD_=65536
+
+# Render sets PORT env var
 ENV PORT=10000
 EXPOSE ${PORT}
 
-# Use shell form so $PORT is expanded at runtime
 CMD streamlit run main.py \
     --server.port=$PORT \
     --server.address=0.0.0.0 \

@@ -22,9 +22,6 @@ openai==1.37.0
 streamlit-webrtc==0.47.9
 av==12.3.0
 
-# Voice feedback
-pyttsx3==2.98
-
 # Utilities
 protobuf==4.25.3
 pyyaml==6.0.1

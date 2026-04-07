@@ -36,6 +36,31 @@ try:
 except Exception:
     pass
 
+_last_spoken = {"text": "", "time": 0}
+
+def _browser_speak(text):
+    """Use browser's built-in speech synthesis (works on cloud, no server speakers needed)."""
+    if not text:
+        return
+    now = time.time()
+    # Don't repeat same text within 5 seconds
+    if text == _last_spoken["text"] and (now - _last_spoken["time"]) < 5:
+        return
+    _last_spoken["text"] = text
+    _last_spoken["time"] = now
+    safe = text.replace("'", "\\'").replace('"', '\\"')
+    js = f"""
+    <script>
+    if (window.speechSynthesis && !window.speechSynthesis.speaking) {{
+        const u = new SpeechSynthesisUtterance('{safe}');
+        u.rate = 1.1; u.volume = 0.8;
+        window.speechSynthesis.speak(u);
+    }}
+    </script>
+    """
+    st.components.v1.html(js, height=0)
+
+
 ASSETS_VIDEOS = ROOT / "assets" / "videos"
 DEMO_VIDEO = ASSETS_VIDEOS / "demo_2.mp4"
 MODELS_DIR = ROOT / "models"
@@ -187,8 +212,10 @@ def _webrtc_exercise_mode(exercise_display_name):
         cols[3].metric("Exercise", exercise.canonical_to_display_name(state["exercise"]))
         if state["injury"]:
             st.error(f"**{state['injury']}**")
+            _browser_speak(state["injury"])
         if state["tip"]:
             st.info(f"**Tip:** {state['tip']}")
+            _browser_speak(state["tip"])
 
 
 def _webrtc_auto_classify_mode():
@@ -215,8 +242,10 @@ def _webrtc_auto_classify_mode():
         cols[3].metric("Duration", f"{state['duration'] / 60:.1f} min")
         if state["injury"]:
             st.error(f"**{state['injury']}**")
+            _browser_speak(state["injury"])
         if state["tip"]:
             st.info(f"**Tip:** {state['tip']}")
+            _browser_speak(state["tip"])
         if state["breakdown"]:
             for name, data in state["breakdown"].items():
                 st.write(f"- **{name}**: {data['reps']} reps ({data['calories']} cal)")

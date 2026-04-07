@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -39,34 +40,54 @@ ASSETS_VIDEOS = ROOT / "assets" / "videos"
 DEMO_VIDEO = ASSETS_VIDEOS / "demo_2.mp4"
 MODELS_DIR = ROOT / "models"
 
-RTC_CONFIGURATION = None
-if _WEBRTC_AVAILABLE:
-    RTC_CONFIGURATION = RTCConfiguration(
-        {"iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-            {"urls": ["stun:stun.relay.metered.ca:80"]},
-            {
-                "urls": ["turn:global.relay.metered.ca:80"],
-                "username": "e8dd65b92aad406e93f6e420",
-                "credential": "VhU/ai0UYjpIaOam",
-            },
-            {
-                "urls": ["turn:global.relay.metered.ca:80?transport=tcp"],
-                "username": "e8dd65b92aad406e93f6e420",
-                "credential": "VhU/ai0UYjpIaOam",
-            },
-            {
-                "urls": ["turn:global.relay.metered.ca:443"],
-                "username": "e8dd65b92aad406e93f6e420",
-                "credential": "VhU/ai0UYjpIaOam",
-            },
-            {
-                "urls": ["turns:global.relay.metered.ca:443?transport=tcp"],
-                "username": "e8dd65b92aad406e93f6e420",
-                "credential": "VhU/ai0UYjpIaOam",
-            },
-        ]}
-    )
+def _get_rtc_configuration():
+    """Build RTC config from env vars. TURN server required for cloud deployment."""
+    if not _WEBRTC_AVAILABLE:
+        return None
+    ice_servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
+    # Read TURN credentials from env (set in Render dashboard)
+    turn_url = os.environ.get("TURN_URL", "")
+    turn_user = os.environ.get("TURN_USERNAME", "")
+    turn_cred = os.environ.get("TURN_CREDENTIAL", "")
+    if turn_url and turn_user and turn_cred:
+        ice_servers.append({
+            "urls": [turn_url],
+            "username": turn_user,
+            "credential": turn_cred,
+        })
+        # Also add TCP and TLS variants
+        if ":" in turn_url:
+            base = turn_url.split("?")[0]
+            ice_servers.append({"urls": [f"{base}?transport=tcp"], "username": turn_user, "credential": turn_cred})
+            tls_url = base.replace("turn:", "turns:", 1)
+            if ":443" not in tls_url:
+                tls_url = tls_url.rsplit(":", 1)[0] + ":443"
+            ice_servers.append({"urls": [f"{tls_url}?transport=tcp"], "username": turn_user, "credential": turn_cred})
+    return RTCConfiguration({"iceServers": ice_servers})
+
+RTC_CONFIGURATION = _get_rtc_configuration()
+_TURN_CONFIGURED = bool(os.environ.get("TURN_URL"))
+
+def _show_turn_setup_help():
+    """Show instructions to set up TURN server for WebCam on cloud."""
+    st.warning("**WebCam needs a TURN server to work on cloud deployment.**")
+    st.markdown("""
+**Free setup (1 minute):**
+1. Go to [metered.ca/tools/openrelay](https://www.metered.ca/tools/openrelay/) and sign up free
+2. Copy your **TURN URL**, **Username**, and **Credential** from the dashboard
+3. In Render dashboard → **Environment** → add these 3 variables:
+
+| Key | Example Value |
+|-----|---------------|
+| `TURN_URL` | `turn:global.relay.metered.ca:80` |
+| `TURN_USERNAME` | `your_username_from_metered` |
+| `TURN_CREDENTIAL` | `your_credential_from_metered` |
+
+4. Redeploy - WebCam will work instantly!
+
+**Meanwhile, use Video mode** - upload any exercise video and the AI will analyze it.
+""")
+
 
 EXERCISE_NAME_MAP = {
     'Bicep Curl': 'barbell biceps curl',
@@ -234,9 +255,11 @@ def main():
             'Exercise', ('Bicep Curl', 'Push Up', 'Squat', 'Shoulder Press')
         )
 
-        if _WEBRTC_AVAILABLE:
+        if _WEBRTC_AVAILABLE and _TURN_CONFIGURED:
             st.caption("Allow camera access when prompted. Click START to begin.")
             _webrtc_exercise_mode(exercise_general)
+        elif _WEBRTC_AVAILABLE and not _TURN_CONFIGURED:
+            _show_turn_setup_help()
         else:
             st.caption("Click Start. Webcam runs until you refresh.")
             if st.button('Start Exercise', type="primary"):
@@ -254,9 +277,11 @@ def main():
                     exer.shoulder_press(None, counter=0, stage=None)
 
     elif options == 'Auto Classify':
-        if _WEBRTC_AVAILABLE:
+        if _WEBRTC_AVAILABLE and _TURN_CONFIGURED:
             st.caption("AI automatically detects your exercise and counts reps. Click START.")
             _webrtc_auto_classify_mode()
+        elif _WEBRTC_AVAILABLE and not _TURN_CONFIGURED:
+            _show_turn_setup_help()
         else:
             st.caption("Join hands to stop.")
             if st.button('Start Auto Classification', type="primary"):

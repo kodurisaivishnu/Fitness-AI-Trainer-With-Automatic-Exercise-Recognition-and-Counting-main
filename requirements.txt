@@ -22,6 +22,9 @@ openai==1.37.0
 streamlit-webrtc==0.47.9
 av==12.3.0
 
+# Auto-refresh for live stats + voice during WebRTC streaming
+streamlit-autorefresh==1.0.1
+
 # Utilities
 protobuf==4.25.3
 pyyaml==6.0.1

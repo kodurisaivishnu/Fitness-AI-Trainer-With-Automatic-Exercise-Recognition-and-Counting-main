@@ -36,29 +36,36 @@ try:
 except Exception:
     pass
 
-_last_spoken = {"text": "", "time": 0}
-
 def _browser_speak(text):
-    """Use browser's built-in speech synthesis (works on cloud, no server speakers needed)."""
+    """Speak text aloud using browser's speechSynthesis via st.components.v1.html.
+    Each call uses a unique HTML body so Streamlit always re-renders the iframe."""
     if not text:
         return
+    last = st.session_state.get("_last_spoken", "")
+    last_time = st.session_state.get("_last_spoken_time", 0)
     now = time.time()
-    # Don't repeat same text within 5 seconds
-    if text == _last_spoken["text"] and (now - _last_spoken["time"]) < 5:
+    if text == last and (now - last_time) < 5:
         return
-    _last_spoken["text"] = text
-    _last_spoken["time"] = now
-    safe = text.replace("'", "\\'").replace('"', '\\"')
-    js = f"""
+    st.session_state["_last_spoken"] = text
+    st.session_state["_last_spoken_time"] = now
+    safe = text.replace("'", "\\'").replace('"', '\\"').replace("\n", " ")
+    # Unique timestamp in the HTML body forces Streamlit to create a new iframe
+    ts = int(now * 1000)
+    html = f"""
+    <html><body>
+    <div id="t{ts}" style="display:none">{ts}</div>
     <script>
-    if (window.speechSynthesis && !window.speechSynthesis.speaking) {{
+    const synth = window.parent.speechSynthesis || window.speechSynthesis;
+    if (synth) {{
+        synth.cancel();
         const u = new SpeechSynthesisUtterance('{safe}');
-        u.rate = 1.1; u.volume = 0.8;
-        window.speechSynthesis.speak(u);
+        u.rate = 1.0; u.volume = 1.0; u.lang = 'en-US';
+        synth.speak(u);
     }}
     </script>
+    </body></html>
     """
-    st.components.v1.html(js, height=0)
+    st.components.v1.html(html, height=0)
 
 
 ASSETS_VIDEOS = ROOT / "assets" / "videos"
@@ -186,7 +193,7 @@ def _show_model_metrics_in_sidebar():
     st.sidebar.markdown("---")
 
 
-def _webrtc_exercise_mode(exercise_display_name):
+def _webrtc_exercise_mode(exercise_display_name, voice_on=True):
     exercise_canonical = EXERCISE_NAME_MAP.get(exercise_display_name, "push-up")
     from webrtc_processor import WebRTCExerciseProcessor
 
@@ -203,6 +210,13 @@ def _webrtc_exercise_mode(exercise_display_name):
         ctx.video_processor.set_exercise(exercise_canonical)
 
     if ctx.state.playing and ctx.video_processor:
+        # Auto-refresh every 2 seconds so stats and voice update while streaming
+        try:
+            from streamlit_autorefresh import st_autorefresh
+            st_autorefresh(interval=2000, limit=None, key="exercise_refresh")
+        except ImportError:
+            pass  # works without it, just won't auto-update stats
+
         exercise = _get_exercise()
         state = ctx.video_processor.get_state()
         cols = st.columns(4)
@@ -212,13 +226,15 @@ def _webrtc_exercise_mode(exercise_display_name):
         cols[3].metric("Exercise", exercise.canonical_to_display_name(state["exercise"]))
         if state["injury"]:
             st.error(f"**{state['injury']}**")
-            _browser_speak(state["injury"])
+            if voice_on:
+                _browser_speak(state["injury"])
         if state["tip"]:
             st.info(f"**Tip:** {state['tip']}")
-            _browser_speak(state["tip"])
+            if voice_on:
+                _browser_speak(state["tip"])
 
 
-def _webrtc_auto_classify_mode():
+def _webrtc_auto_classify_mode(voice_on=True):
     from webrtc_processor import WebRTCAutoClassifyProcessor
 
     ctx = webrtc_streamer(
@@ -234,6 +250,13 @@ def _webrtc_auto_classify_mode():
         if not ctx.video_processor.model_ready:
             st.error("Model not loaded. Check **models/** directory.")
             return
+
+        try:
+            from streamlit_autorefresh import st_autorefresh
+            st_autorefresh(interval=2000, limit=None, key="autoclassify_refresh")
+        except ImportError:
+            pass
+
         state = ctx.video_processor.get_state()
         cols = st.columns(4)
         cols[0].metric("Detected", state["prediction"])
@@ -242,10 +265,12 @@ def _webrtc_auto_classify_mode():
         cols[3].metric("Duration", f"{state['duration'] / 60:.1f} min")
         if state["injury"]:
             st.error(f"**{state['injury']}**")
-            _browser_speak(state["injury"])
+            if voice_on:
+                _browser_speak(state["injury"])
         if state["tip"]:
             st.info(f"**Tip:** {state['tip']}")
-            _browser_speak(state["tip"])
+            if voice_on:
+                _browser_speak(state["tip"])
         if state["breakdown"]:
             for name, data in state["breakdown"].items():
                 st.write(f"- **{name}**: {data['reps']} reps ({data['calories']} cal)")
@@ -264,7 +289,7 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Settings")
-    voice_enabled = st.sidebar.checkbox("Voice Feedback", value=False, help="Local mode only")
+    voice_enabled = st.sidebar.checkbox("Voice Feedback", value=True, help="Speaks form tips and injury alerts through your browser")
     user_weight = st.sidebar.number_input("Weight (kg)", min_value=30, max_value=200, value=70, step=1)
 
     options = st.sidebar.selectbox('Mode', ('Video', 'WebCam', 'Auto Classify', 'Chatbot'))
@@ -317,7 +342,7 @@ def main():
 
         if _WEBRTC_AVAILABLE and _TURN_CONFIGURED:
             st.caption("Allow camera access when prompted. Click START to begin.")
-            _webrtc_exercise_mode(exercise_general)
+            _webrtc_exercise_mode(exercise_general, voice_on=voice_enabled)
         elif _WEBRTC_AVAILABLE:
             _show_turn_help()
         else:
@@ -339,7 +364,7 @@ def main():
     elif options == 'Auto Classify':
         if _WEBRTC_AVAILABLE and _TURN_CONFIGURED:
             st.caption("AI automatically detects your exercise and counts reps. Click START.")
-            _webrtc_auto_classify_mode()
+            _webrtc_auto_classify_mode(voice_on=voice_enabled)
         elif _WEBRTC_AVAILABLE:
             _show_turn_help()
         else:
